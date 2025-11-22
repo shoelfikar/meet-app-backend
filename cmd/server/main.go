@@ -12,6 +12,7 @@ import (
 	"github.com/meet-app/backend/internal/repository"
 	"github.com/meet-app/backend/internal/service"
 	"github.com/meet-app/backend/internal/sse"
+	"github.com/meet-app/backend/internal/websocket"
 	"github.com/meet-app/backend/pkg/database"
 )
 
@@ -65,6 +66,7 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService)
 	meetingHandler := handlers.NewMeetingHandler(meetingService, messageService)
 	sseHandler := sse.NewHandler()
+	wsHandler := websocket.NewHandler()
 
 	// Initialize router
 	router := gin.New()
@@ -132,9 +134,7 @@ func main() {
 	}
 
 	// WebSocket endpoint (protected)
-	router.GET("/ws", middleware.AuthMiddleware(&cfg.JWT), func(c *gin.Context) {
-		c.JSON(200, gin.H{"message": "WebSocket endpoint - Not implemented yet"})
-	})
+	router.GET("/ws", middleware.AuthMiddleware(&cfg.JWT), wsHandler.HandleWebSocket)
 
 	// Start server
 	log.Printf("🚀 Server starting on port %s", cfg.Server.Port)

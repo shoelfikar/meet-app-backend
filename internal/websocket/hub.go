@@ -1,0 +1,259 @@
+package websocket
+
+import (
+	"log"
+	"sync"
+
+	"github.com/google/uuid"
+)
+
+// Client represents a WebSocket client
+type Client struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	Username  string
+	MeetingID uuid.UUID
+	Send      chan []byte
+	Hub       *Hub
+}
+
+// Hub maintains the set of active WebSocket clients
+type Hub struct {
+	// Clients registered per meeting
+	clients map[uuid.UUID]map[uuid.UUID]*Client
+
+	// Register requests from clients
+	register chan *Client
+
+	// Unregister requests from clients
+	unregister chan *Client
+
+	// Broadcast messages to specific client
+	broadcast chan *Message
+
+	mu sync.RWMutex
+}
+
+// NewHub creates a new WebSocket hub
+func NewHub() *Hub {
+	return &Hub{
+		clients:    make(map[uuid.UUID]map[uuid.UUID]*Client),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		broadcast:  make(chan *Message, 256),
+	}
+}
+
+// Run starts the hub
+func (h *Hub) Run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.registerClient(client)
+
+		case client := <-h.unregister:
+			h.unregisterClient(client)
+
+		case message := <-h.broadcast:
+			h.broadcastMessage(message)
+		}
+	}
+}
+
+// registerClient registers a new client
+func (h *Hub) registerClient(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.clients[client.MeetingID] == nil {
+		h.clients[client.MeetingID] = make(map[uuid.UUID]*Client)
+	}
+	h.clients[client.MeetingID][client.UserID] = client
+
+	log.Printf("WebSocket: Client registered - UserID: %s, MeetingID: %s, Total: %d",
+		client.UserID, client.MeetingID, len(h.clients[client.MeetingID]))
+
+	// Notify other peers about the new peer
+	h.notifyPeerJoined(client)
+}
+
+// unregisterClient unregisters a client
+func (h *Hub) unregisterClient(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if clients, ok := h.clients[client.MeetingID]; ok {
+		if _, ok := clients[client.UserID]; ok {
+			delete(clients, client.UserID)
+			close(client.Send)
+
+			log.Printf("WebSocket: Client unregistered - UserID: %s, MeetingID: %s",
+				client.UserID, client.MeetingID)
+
+			// Clean up empty meetings
+			if len(clients) == 0 {
+				delete(h.clients, client.MeetingID)
+			}
+
+			// Notify other peers about the peer leaving
+			h.notifyPeerLeft(client)
+		}
+	}
+}
+
+// broadcastMessage sends a message to a specific client or meeting
+func (h *Hub) broadcastMessage(message *Message) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	clients, ok := h.clients[message.MeetingID]
+	if !ok {
+		log.Printf("WebSocket: No clients in meeting %s", message.MeetingID)
+		return
+	}
+
+	// If message has a specific recipient, send only to them
+	if message.To != uuid.Nil {
+		if client, ok := clients[message.To]; ok {
+			select {
+			case client.Send <- mustMarshal(message):
+				log.Printf("WebSocket: Sent %s from %s to %s", message.Type, message.From, message.To)
+			default:
+				log.Printf("WebSocket: Client %s buffer full", message.To)
+			}
+		} else {
+			log.Printf("WebSocket: Recipient %s not found in meeting", message.To)
+		}
+		return
+	}
+
+	// Otherwise, broadcast to all clients in the meeting except sender
+	sentCount := 0
+	for userID, client := range clients {
+		if userID == message.From {
+			continue
+		}
+		select {
+		case client.Send <- mustMarshal(message):
+			sentCount++
+		default:
+			log.Printf("WebSocket: Client %s buffer full", userID)
+		}
+	}
+
+	log.Printf("WebSocket: Broadcast %s from %s to %d clients", message.Type, message.From, sentCount)
+}
+
+// notifyPeerJoined notifies all peers in a meeting about a new peer
+func (h *Hub) notifyPeerJoined(newClient *Client) {
+	clients, ok := h.clients[newClient.MeetingID]
+	if !ok {
+		return
+	}
+
+	peerInfo := PeerInfo{
+		UserID:   newClient.UserID,
+		Username: newClient.Username,
+	}
+
+	message := &Message{
+		Type:      MessageTypePeerJoined,
+		From:      newClient.UserID,
+		MeetingID: newClient.MeetingID,
+		Data:      peerInfo,
+	}
+
+	// Send to all other clients
+	for userID, client := range clients {
+		if userID == newClient.UserID {
+			continue
+		}
+		select {
+		case client.Send <- mustMarshal(message):
+		default:
+			log.Printf("WebSocket: Failed to notify %s about new peer", userID)
+		}
+	}
+
+	// Send list of existing peers to the new client
+	existingPeers := make([]PeerInfo, 0)
+	for userID, client := range clients {
+		if userID != newClient.UserID {
+			existingPeers = append(existingPeers, PeerInfo{
+				UserID:   client.UserID,
+				Username: client.Username,
+			})
+		}
+	}
+
+	if len(existingPeers) > 0 {
+		readyMessage := &Message{
+			Type:      MessageTypeReady,
+			MeetingID: newClient.MeetingID,
+			Data:      existingPeers,
+		}
+		select {
+		case newClient.Send <- mustMarshal(readyMessage):
+		default:
+			log.Printf("WebSocket: Failed to send peer list to new client")
+		}
+	}
+}
+
+// notifyPeerLeft notifies all peers in a meeting about a peer leaving
+func (h *Hub) notifyPeerLeft(leftClient *Client) {
+	clients, ok := h.clients[leftClient.MeetingID]
+	if !ok {
+		return
+	}
+
+	message := &Message{
+		Type:      MessageTypePeerLeft,
+		From:      leftClient.UserID,
+		MeetingID: leftClient.MeetingID,
+		Data: PeerInfo{
+			UserID:   leftClient.UserID,
+			Username: leftClient.Username,
+		},
+	}
+
+	for userID, client := range clients {
+		if userID == leftClient.UserID {
+			continue
+		}
+		select {
+		case client.Send <- mustMarshal(message):
+		default:
+			log.Printf("WebSocket: Failed to notify %s about peer leaving", userID)
+		}
+	}
+}
+
+// GetClientsInMeeting returns the number of clients in a meeting
+func (h *Hub) GetClientsInMeeting(meetingID uuid.UUID) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if clients, ok := h.clients[meetingID]; ok {
+		return len(clients)
+	}
+	return 0
+}
+
+// SendMessage sends a message through the hub
+func (h *Hub) SendMessage(message *Message) {
+	h.broadcast <- message
+}
+
+// Global hub instance
+var globalHub *Hub
+var once sync.Once
+
+// GetHub returns the global hub instance
+func GetHub() *Hub {
+	once.Do(func() {
+		globalHub = NewHub()
+		go globalHub.Run()
+	})
+	return globalHub
+}
