@@ -25,8 +25,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # Runtime stage
 FROM alpine:latest
 
-# Install runtime dependencies
-RUN apk --no-cache add ca-certificates tzdata
+# Install runtime dependencies (including wget for healthcheck)
+RUN apk --no-cache add ca-certificates tzdata wget
 
 # Create non-root user
 RUN addgroup -g 1000 appuser && \
@@ -35,7 +35,11 @@ RUN addgroup -g 1000 appuser && \
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/server .
+COPY --from=builder /app/server ./server
+
+# Verify binary exists and make it executable
+RUN chmod +x /app/server && \
+    ls -la /app/server
 
 # Copy migrations (if needed at runtime)
 COPY --from=builder /build/migrations ./migrations
@@ -54,4 +58,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 # Run the application
-CMD ["./server"]
+CMD ["/app/server"]
