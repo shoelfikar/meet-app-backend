@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -136,11 +137,34 @@ func main() {
 	// WebSocket endpoint (protected)
 	router.GET("/ws", middleware.AuthMiddleware(&cfg.JWT), wsHandler.HandleWebSocket)
 
+	// ==========================================
+	// SERVE FRONTEND STATIC FILES
+	// ==========================================
+
+	// Serve static assets (JS, CSS, images)
+	router.Static("/assets", "./public/assets")
+
+	// Serve index.html for all non-API routes (SPA fallback)
+	router.NoRoute(func(c *gin.Context) {
+		// Check if it's an API request
+		if strings.HasPrefix(c.Request.URL.Path, "/api") ||
+			strings.HasPrefix(c.Request.URL.Path, "/ws") ||
+			strings.HasPrefix(c.Request.URL.Path, "/health") ||
+			strings.HasPrefix(c.Request.URL.Path, "/ready") {
+			c.JSON(404, gin.H{"error": "Not found"})
+			return
+		}
+
+		// Serve index.html for SPA routing
+		c.File("./public/index.html")
+	})
+
 	// Start server
 	log.Printf("🚀 Server starting on port %s", cfg.Server.Port)
 	log.Printf("📍 Environment: %s", cfg.Server.Environment)
 	log.Printf("📍 Health check: http://localhost:%s/health", cfg.Server.Port)
 	log.Printf("📍 API: http://localhost:%s/api", cfg.Server.Port)
+	log.Printf("📍 Frontend: http://localhost:%s", cfg.Server.Port)
 
 	if err := router.Run(":" + cfg.Server.Port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
