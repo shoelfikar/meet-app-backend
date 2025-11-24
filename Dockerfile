@@ -1,5 +1,10 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+# Use buildx to support cross-platform builds
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+# Build arguments for target platform
+ARG TARGETOS
+ARG TARGETARCH
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -17,13 +22,15 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Use TARGETOS and TARGETARCH for cross-platform support
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} go build \
     -ldflags="-w -s" \
     -o /app/server \
     ./cmd/server/main.go
 
 # Runtime stage
-FROM alpine:latest
+# Use target platform for runtime
+FROM --platform=$TARGETPLATFORM alpine:latest
 
 # Install runtime dependencies (including wget for healthcheck)
 RUN apk --no-cache add ca-certificates tzdata wget
