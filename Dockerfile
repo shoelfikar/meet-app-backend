@@ -57,12 +57,15 @@ RUN chown -R appuser:appuser /app
 # Switch to non-root user
 USER appuser
 
+# Set default port (can be overridden by environment variable)
+ENV PORT=8080
+
 # Expose port
 EXPOSE 8080
 
-# Health check
+# Health check (uses PORT environment variable)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD sh -c 'wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1'
 
 # Run the application
 CMD ["/app/server"]

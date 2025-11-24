@@ -1,9 +1,12 @@
 package service
 
 import (
+	"log"
+
 	"github.com/google/uuid"
 	"github.com/meet-app/backend/internal/models"
 	"github.com/meet-app/backend/internal/repository"
+	"github.com/meet-app/backend/internal/sse"
 )
 
 type MessageService interface {
@@ -53,7 +56,21 @@ func (s *messageService) SendMessage(
 		return nil, err
 	}
 
-	return s.messageRepo.FindByID(message.ID)
+	// Retrieve full message with user data
+	fullMessage, err := s.messageRepo.FindByID(message.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Broadcast message to all participants via SSE
+	hub := sse.GetHub()
+	hub.BroadcastToMeeting(meetingID, sse.Event{
+		Type: sse.EventChatMessage,
+		Data: fullMessage.ToResponse(),
+	})
+	log.Printf("[Chat] Message broadcast to meeting %s from user %s", meetingID, userID)
+
+	return fullMessage, nil
 }
 
 func (s *messageService) GetMeetingMessages(meetingID uuid.UUID, limit int) ([]models.Message, error) {
