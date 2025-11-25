@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/meet-app/backend/internal/api/middleware"
+	"github.com/meet-app/backend/internal/repository"
 )
 
 const (
@@ -38,13 +39,15 @@ var upgrader = websocket.Upgrader{
 
 // Handler handles WebSocket connections
 type Handler struct {
-	hub *Hub
+	hub              *Hub
+	participantRepo  repository.ParticipantRepository
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler() *Handler {
+func NewHandler(participantRepo repository.ParticipantRepository) *Handler {
 	return &Handler{
-		hub: GetHub(),
+		hub:             GetHub(),
+		participantRepo: participantRepo,
 	}
 }
 
@@ -92,8 +95,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		Hub:       h.hub,
 	}
 
-	// Register client to hub
-	h.hub.register <- client
+	// Add to pending clients (not registered for WebRTC yet)
+	// Will be moved to registered clients after join approval
+	h.hub.AddPendingClient(client)
 
 	// Start goroutines for reading and writing
 	go h.writePump(client, conn)
@@ -103,6 +107,8 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 // readPump pumps messages from the WebSocket connection to the hub
 func (h *Handler) readPump(client *Client, conn *websocket.Conn) {
 	defer func() {
+		// Remove from pending or registered clients
+		h.hub.RemovePendingClient(client)
 		h.hub.unregister <- client
 		conn.Close()
 	}()
@@ -200,6 +206,10 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 		log.Printf("WebSocket: User %s changed media state in meeting %s", client.UserID, client.MeetingID)
 		h.hub.SendMessage(msg)
 
+	case MessageTypeHostJoin:
+		// Handle host joining (auto-approve)
+		h.handleHostJoin(client, msg)
+
 	case MessageTypeJoinRequest:
 		// Handle join request from user
 		h.handleJoinRequest(client, msg)
@@ -224,6 +234,16 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 		log.Printf("WebSocket: Unknown message type: %s", msg.Type)
 		h.sendError(client, "Unknown message type")
 	}
+}
+
+// handleHostJoin handles host joining (auto-approve for WebRTC)
+func (h *Handler) handleHostJoin(client *Client, msg *Message) {
+	log.Printf("WebSocket: Host %s joining meeting %s", client.UserID, client.MeetingID)
+
+	// Move client from pending to registered (auto-approve for host)
+	h.hub.ApproveClient(client.MeetingID, client.UserID)
+
+	log.Printf("WebSocket: Host %s auto-approved and registered", client.UserID)
 }
 
 // handleJoinRequest handles join request from a user
@@ -251,6 +271,33 @@ func (h *Handler) handleJoinRequest(client *Client, msg *Message) {
 	}
 
 	email, _ := data["email"].(string)
+
+	// Check if user has already joined this meeting before (re-join case)
+	_, err = h.participantRepo.FindByUserAndMeeting(client.UserID, client.MeetingID)
+	if err == nil {
+		// User has joined before - auto-approve without host confirmation
+		log.Printf("WebSocket: User %s re-joining meeting %s - auto-approving", client.UserID, client.MeetingID)
+
+		// Move client from pending to registered
+		h.hub.ApproveClient(client.MeetingID, client.UserID)
+
+		// Send approval to user
+		approvalMsg := &Message{
+			Type:      MessageTypeJoinApproved,
+			To:        client.UserID,
+			MeetingID: client.MeetingID,
+			Data: map[string]interface{}{
+				"message": "Auto-approved (returning user)",
+			},
+		}
+		h.hub.SendMessage(approvalMsg)
+
+		log.Printf("WebSocket: User %s auto-approved for re-join", client.UserID)
+		return
+	}
+
+	// User is joining for the first time - require host approval
+	log.Printf("WebSocket: User %s joining meeting %s for first time - requiring approval", client.UserID, client.MeetingID)
 
 	// Create join request info
 	joinRequest := &JoinRequestInfo{
@@ -333,6 +380,10 @@ func (h *Handler) handleApproveJoinRequest(client *Client, msg *Message) {
 
 	// Remove from pending requests
 	h.hub.RemovePendingJoinRequest(client.MeetingID, requestUserID)
+
+	// Move client from pending to registered (approved for WebRTC)
+	// This will trigger peer-joined notification to all existing participants
+	h.hub.ApproveClient(client.MeetingID, requestUserID)
 
 	// Send approval to requesting user
 	approvalMsg := &Message{

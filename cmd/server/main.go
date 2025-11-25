@@ -67,7 +67,7 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService)
 	meetingHandler := handlers.NewMeetingHandler(meetingService, messageService)
 	sseHandler := sse.NewHandler()
-	wsHandler := websocket.NewHandler()
+	wsHandler := websocket.NewHandler(participantRepo)
 
 	// Initialize router
 	router := gin.New()

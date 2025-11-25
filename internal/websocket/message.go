@@ -21,6 +21,7 @@ const (
 	MessageTypeMediaStateChanged MessageType = "media-state-changed"
 
 	// Join approval
+	MessageTypeHostJoin           MessageType = "host-join"
 	MessageTypeJoinRequest        MessageType = "join-request"
 	MessageTypeJoinRequestPending MessageType = "join-request-pending"
 	MessageTypePendingJoinRequest MessageType = "pending-join-request"

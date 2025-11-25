@@ -19,8 +19,11 @@ type Client struct {
 
 // Hub maintains the set of active WebSocket clients
 type Hub struct {
-	// Clients registered per meeting
+	// Clients registered per meeting (approved and in WebRTC)
 	clients map[uuid.UUID]map[uuid.UUID]*Client
+
+	// Pending clients waiting for approval (connected but not in WebRTC)
+	pendingClients map[uuid.UUID]map[uuid.UUID]*Client
 
 	// Pending join requests per meeting
 	pendingJoinRequests map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo
@@ -41,6 +44,7 @@ type Hub struct {
 func NewHub() *Hub {
 	return &Hub{
 		clients:             make(map[uuid.UUID]map[uuid.UUID]*Client),
+		pendingClients:      make(map[uuid.UUID]map[uuid.UUID]*Client),
 		pendingJoinRequests: make(map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo),
 		register:            make(chan *Client),
 		unregister:          make(chan *Client),
@@ -110,38 +114,60 @@ func (h *Hub) broadcastMessage(message *Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	clients, ok := h.clients[message.MeetingID]
-	if !ok {
+	// Get both registered and pending clients
+	registeredClients, hasRegistered := h.clients[message.MeetingID]
+	pendingClientsMap, hasPending := h.pendingClients[message.MeetingID]
+
+	if !hasRegistered && !hasPending {
 		log.Printf("WebSocket: No clients in meeting %s", message.MeetingID)
 		return
 	}
 
 	// If message has a specific recipient, send only to them
 	if message.To != uuid.Nil {
-		if client, ok := clients[message.To]; ok {
-			select {
-			case client.Send <- mustMarshal(message):
-				log.Printf("WebSocket: Sent %s from %s to %s", message.Type, message.From, message.To)
-			default:
-				log.Printf("WebSocket: Client %s buffer full", message.To)
+		// Check in registered clients
+		if hasRegistered {
+			if client, ok := registeredClients[message.To]; ok {
+				select {
+				case client.Send <- mustMarshal(message):
+					log.Printf("WebSocket: Sent %s from %s to %s (registered)", message.Type, message.From, message.To)
+				default:
+					log.Printf("WebSocket: Client %s buffer full", message.To)
+				}
+				return
 			}
-		} else {
-			log.Printf("WebSocket: Recipient %s not found in meeting", message.To)
 		}
+
+		// Check in pending clients
+		if hasPending {
+			if client, ok := pendingClientsMap[message.To]; ok {
+				select {
+				case client.Send <- mustMarshal(message):
+					log.Printf("WebSocket: Sent %s from %s to %s (pending)", message.Type, message.From, message.To)
+				default:
+					log.Printf("WebSocket: Client %s buffer full", message.To)
+				}
+				return
+			}
+		}
+
+		log.Printf("WebSocket: Recipient %s not found in meeting", message.To)
 		return
 	}
 
-	// Otherwise, broadcast to all clients in the meeting except sender
+	// Otherwise, broadcast to all registered clients in the meeting except sender
 	sentCount := 0
-	for userID, client := range clients {
-		if userID == message.From {
-			continue
-		}
-		select {
-		case client.Send <- mustMarshal(message):
-			sentCount++
-		default:
-			log.Printf("WebSocket: Client %s buffer full", userID)
+	if hasRegistered {
+		for userID, client := range registeredClients {
+			if userID == message.From {
+				continue
+			}
+			select {
+			case client.Send <- mustMarshal(message):
+				sentCount++
+			default:
+				log.Printf("WebSocket: Client %s buffer full", userID)
+			}
 		}
 	}
 
@@ -294,9 +320,104 @@ func (h *Hub) GetHostClient(meetingID uuid.UUID, hostUserID uuid.UUID) *Client {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	// Check in registered clients first
 	if clients, ok := h.clients[meetingID]; ok {
 		if hostClient, ok := clients[hostUserID]; ok {
 			return hostClient
+		}
+	}
+
+	// Check in pending clients
+	if clients, ok := h.pendingClients[meetingID]; ok {
+		if hostClient, ok := clients[hostUserID]; ok {
+			return hostClient
+		}
+	}
+
+	return nil
+}
+
+// AddPendingClient adds a client to pending clients (not yet approved for WebRTC)
+func (h *Hub) AddPendingClient(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.pendingClients[client.MeetingID] == nil {
+		h.pendingClients[client.MeetingID] = make(map[uuid.UUID]*Client)
+	}
+	h.pendingClients[client.MeetingID][client.UserID] = client
+
+	log.Printf("WebSocket: Pending client added - UserID: %s, MeetingID: %s", client.UserID, client.MeetingID)
+}
+
+// RemovePendingClient removes a client from pending clients
+func (h *Hub) RemovePendingClient(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if clients, ok := h.pendingClients[client.MeetingID]; ok {
+		if _, ok := clients[client.UserID]; ok {
+			delete(clients, client.UserID)
+
+			// Clean up empty meetings
+			if len(clients) == 0 {
+				delete(h.pendingClients, client.MeetingID)
+			}
+
+			log.Printf("WebSocket: Pending client removed - UserID: %s, MeetingID: %s", client.UserID, client.MeetingID)
+		}
+	}
+}
+
+// ApproveClient moves a client from pending to registered (approved for WebRTC)
+func (h *Hub) ApproveClient(meetingID uuid.UUID, userID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Get client from pending
+	if clients, ok := h.pendingClients[meetingID]; ok {
+		if client, ok := clients[userID]; ok {
+			// Remove from pending
+			delete(clients, userID)
+			if len(clients) == 0 {
+				delete(h.pendingClients, meetingID)
+			}
+
+			// Add to registered clients
+			if h.clients[meetingID] == nil {
+				h.clients[meetingID] = make(map[uuid.UUID]*Client)
+			}
+			h.clients[meetingID][userID] = client
+
+			log.Printf("WebSocket: Client approved and registered - UserID: %s, MeetingID: %s", userID, meetingID)
+
+			// Notify other peers about the new peer
+			h.notifyPeerJoined(client)
+		}
+	}
+}
+
+// GetPendingClient gets a pending client
+func (h *Hub) GetPendingClient(meetingID uuid.UUID, userID uuid.UUID) *Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if clients, ok := h.pendingClients[meetingID]; ok {
+		if client, ok := clients[userID]; ok {
+			return client
+		}
+	}
+	return nil
+}
+
+// GetClient gets a registered client
+func (h *Hub) GetClient(meetingID uuid.UUID, userID uuid.UUID) *Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if clients, ok := h.clients[meetingID]; ok {
+		if client, ok := clients[userID]; ok {
+			return client
 		}
 	}
 	return nil
