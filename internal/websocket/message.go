@@ -20,9 +20,18 @@ const (
 	// Media state
 	MessageTypeMediaStateChanged MessageType = "media-state-changed"
 
+	// Join approval
+	MessageTypeJoinRequest        MessageType = "join-request"
+	MessageTypeJoinRequestPending MessageType = "join-request-pending"
+	MessageTypePendingJoinRequest MessageType = "pending-join-request"
+	MessageTypeApproveJoinRequest MessageType = "approve-join-request"
+	MessageTypeRejectJoinRequest  MessageType = "reject-join-request"
+	MessageTypeJoinApproved       MessageType = "join-approved"
+	MessageTypeJoinRejected       MessageType = "join-rejected"
+
 	// Connection status
-	MessageTypeReady       MessageType = "ready"
-	MessageTypeError       MessageType = "error"
+	MessageTypeReady MessageType = "ready"
+	MessageTypeError MessageType = "error"
 )
 
 // Message represents a WebSocket message
@@ -56,4 +65,12 @@ type PeerInfo struct {
 // ErrorMessage represents an error message
 type ErrorMessage struct {
 	Message string `json:"message"`
+}
+
+// JoinRequestInfo represents information about a join request
+type JoinRequestInfo struct {
+	UserID    uuid.UUID `json:"user_id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	Timestamp int64     `json:"timestamp"`
 }

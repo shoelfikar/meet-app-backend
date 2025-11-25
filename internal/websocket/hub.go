@@ -22,6 +22,9 @@ type Hub struct {
 	// Clients registered per meeting
 	clients map[uuid.UUID]map[uuid.UUID]*Client
 
+	// Pending join requests per meeting
+	pendingJoinRequests map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo
+
 	// Register requests from clients
 	register chan *Client
 
@@ -37,10 +40,11 @@ type Hub struct {
 // NewHub creates a new WebSocket hub
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[uuid.UUID]map[uuid.UUID]*Client),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan *Message, 256),
+		clients:             make(map[uuid.UUID]map[uuid.UUID]*Client),
+		pendingJoinRequests: make(map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo),
+		register:            make(chan *Client),
+		unregister:          make(chan *Client),
+		broadcast:           make(chan *Message, 256),
 	}
 }
 
@@ -243,6 +247,59 @@ func (h *Hub) GetClientsInMeeting(meetingID uuid.UUID) int {
 // SendMessage sends a message through the hub
 func (h *Hub) SendMessage(message *Message) {
 	h.broadcast <- message
+}
+
+// AddPendingJoinRequest adds a pending join request
+func (h *Hub) AddPendingJoinRequest(meetingID uuid.UUID, request *JoinRequestInfo) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.pendingJoinRequests[meetingID] == nil {
+		h.pendingJoinRequests[meetingID] = make(map[uuid.UUID]*JoinRequestInfo)
+	}
+	h.pendingJoinRequests[meetingID][request.UserID] = request
+
+	log.Printf("WebSocket: Pending join request added - UserID: %s, MeetingID: %s", request.UserID, meetingID)
+}
+
+// RemovePendingJoinRequest removes a pending join request
+func (h *Hub) RemovePendingJoinRequest(meetingID uuid.UUID, userID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if requests, ok := h.pendingJoinRequests[meetingID]; ok {
+		delete(requests, userID)
+		if len(requests) == 0 {
+			delete(h.pendingJoinRequests, meetingID)
+		}
+		log.Printf("WebSocket: Pending join request removed - UserID: %s, MeetingID: %s", userID, meetingID)
+	}
+}
+
+// GetPendingJoinRequest gets a pending join request
+func (h *Hub) GetPendingJoinRequest(meetingID uuid.UUID, userID uuid.UUID) (*JoinRequestInfo, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if requests, ok := h.pendingJoinRequests[meetingID]; ok {
+		if request, ok := requests[userID]; ok {
+			return request, true
+		}
+	}
+	return nil, false
+}
+
+// GetHostClient returns the host client for a meeting
+func (h *Hub) GetHostClient(meetingID uuid.UUID, hostUserID uuid.UUID) *Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if clients, ok := h.clients[meetingID]; ok {
+		if hostClient, ok := clients[hostUserID]; ok {
+			return hostClient
+		}
+	}
+	return nil
 }
 
 // Global hub instance

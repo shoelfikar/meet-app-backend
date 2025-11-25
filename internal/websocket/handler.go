@@ -200,6 +200,18 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 		log.Printf("WebSocket: User %s changed media state in meeting %s", client.UserID, client.MeetingID)
 		h.hub.SendMessage(msg)
 
+	case MessageTypeJoinRequest:
+		// Handle join request from user
+		h.handleJoinRequest(client, msg)
+
+	case MessageTypeApproveJoinRequest:
+		// Handle approval from host
+		h.handleApproveJoinRequest(client, msg)
+
+	case MessageTypeRejectJoinRequest:
+		// Handle rejection from host
+		h.handleRejectJoinRequest(client, msg)
+
 	case MessageTypeJoin:
 		// Already handled by registration
 		log.Printf("WebSocket: User %s joined meeting %s", client.UserID, client.MeetingID)
@@ -212,6 +224,177 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 		log.Printf("WebSocket: Unknown message type: %s", msg.Type)
 		h.sendError(client, "Unknown message type")
 	}
+}
+
+// handleJoinRequest handles join request from a user
+func (h *Handler) handleJoinRequest(client *Client, msg *Message) {
+	// Parse join request data
+	data, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("WebSocket: Invalid join request data from %s", client.UserID)
+		h.sendError(client, "Invalid join request data")
+		return
+	}
+
+	hostUserIDStr, ok := data["host_user_id"].(string)
+	if !ok {
+		log.Printf("WebSocket: Missing host_user_id in join request")
+		h.sendError(client, "Missing host user ID")
+		return
+	}
+
+	hostUserID, err := uuid.Parse(hostUserIDStr)
+	if err != nil {
+		log.Printf("WebSocket: Invalid host_user_id: %s", hostUserIDStr)
+		h.sendError(client, "Invalid host user ID")
+		return
+	}
+
+	email, _ := data["email"].(string)
+
+	// Create join request info
+	joinRequest := &JoinRequestInfo{
+		UserID:    client.UserID,
+		Username:  client.Username,
+		Email:     email,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Store pending join request
+	h.hub.AddPendingJoinRequest(client.MeetingID, joinRequest)
+
+	// Send pending status to requesting user
+	pendingMsg := &Message{
+		Type:      MessageTypeJoinRequestPending,
+		MeetingID: client.MeetingID,
+		Data: map[string]interface{}{
+			"message": "Waiting for host approval",
+		},
+	}
+	select {
+	case client.Send <- mustMarshal(pendingMsg):
+		log.Printf("WebSocket: Sent pending status to %s", client.UserID)
+	default:
+		log.Printf("WebSocket: Failed to send pending status to %s", client.UserID)
+	}
+
+	// Notify host about pending join request
+	hostClient := h.hub.GetHostClient(client.MeetingID, hostUserID)
+	if hostClient != nil {
+		notifyMsg := &Message{
+			Type:      MessageTypePendingJoinRequest,
+			From:      client.UserID,
+			MeetingID: client.MeetingID,
+			Data:      joinRequest,
+		}
+		select {
+		case hostClient.Send <- mustMarshal(notifyMsg):
+			log.Printf("WebSocket: Notified host %s about join request from %s", hostUserID, client.UserID)
+		default:
+			log.Printf("WebSocket: Failed to notify host about join request")
+		}
+	} else {
+		log.Printf("WebSocket: Host %s not found in meeting %s", hostUserID, client.MeetingID)
+		h.sendError(client, "Host is not available")
+	}
+}
+
+// handleApproveJoinRequest handles approval from host
+func (h *Handler) handleApproveJoinRequest(client *Client, msg *Message) {
+	// Parse approval data
+	data, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("WebSocket: Invalid approval data")
+		h.sendError(client, "Invalid approval data")
+		return
+	}
+
+	requestUserIDStr, ok := data["user_id"].(string)
+	if !ok {
+		log.Printf("WebSocket: Missing user_id in approval")
+		h.sendError(client, "Missing user ID")
+		return
+	}
+
+	requestUserID, err := uuid.Parse(requestUserIDStr)
+	if err != nil {
+		log.Printf("WebSocket: Invalid user_id: %s", requestUserIDStr)
+		h.sendError(client, "Invalid user ID")
+		return
+	}
+
+	// Get pending join request
+	joinRequest, exists := h.hub.GetPendingJoinRequest(client.MeetingID, requestUserID)
+	if !exists {
+		log.Printf("WebSocket: No pending join request for user %s", requestUserID)
+		h.sendError(client, "Join request not found")
+		return
+	}
+
+	// Remove from pending requests
+	h.hub.RemovePendingJoinRequest(client.MeetingID, requestUserID)
+
+	// Send approval to requesting user
+	approvalMsg := &Message{
+		Type:      MessageTypeJoinApproved,
+		To:        requestUserID,
+		MeetingID: client.MeetingID,
+		Data: map[string]interface{}{
+			"message": "Your join request has been approved",
+		},
+	}
+	h.hub.SendMessage(approvalMsg)
+
+	log.Printf("WebSocket: Host %s approved join request from %s (%s)", client.UserID, joinRequest.Username, requestUserID)
+}
+
+// handleRejectJoinRequest handles rejection from host
+func (h *Handler) handleRejectJoinRequest(client *Client, msg *Message) {
+	// Parse rejection data
+	data, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("WebSocket: Invalid rejection data")
+		h.sendError(client, "Invalid rejection data")
+		return
+	}
+
+	requestUserIDStr, ok := data["user_id"].(string)
+	if !ok {
+		log.Printf("WebSocket: Missing user_id in rejection")
+		h.sendError(client, "Missing user ID")
+		return
+	}
+
+	requestUserID, err := uuid.Parse(requestUserIDStr)
+	if err != nil {
+		log.Printf("WebSocket: Invalid user_id: %s", requestUserIDStr)
+		h.sendError(client, "Invalid user ID")
+		return
+	}
+
+	// Get pending join request
+	joinRequest, exists := h.hub.GetPendingJoinRequest(client.MeetingID, requestUserID)
+	if !exists {
+		log.Printf("WebSocket: No pending join request for user %s", requestUserID)
+		h.sendError(client, "Join request not found")
+		return
+	}
+
+	// Remove from pending requests
+	h.hub.RemovePendingJoinRequest(client.MeetingID, requestUserID)
+
+	// Send rejection to requesting user
+	rejectionMsg := &Message{
+		Type:      MessageTypeJoinRejected,
+		To:        requestUserID,
+		MeetingID: client.MeetingID,
+		Data: map[string]interface{}{
+			"message": "Your join request has been rejected",
+		},
+	}
+	h.hub.SendMessage(rejectionMsg)
+
+	log.Printf("WebSocket: Host %s rejected join request from %s (%s)", client.UserID, joinRequest.Username, requestUserID)
 }
 
 // sendError sends an error message to a client

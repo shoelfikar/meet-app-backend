@@ -1,8 +1,6 @@
 package models
 
 import (
-	"crypto/rand"
-	"math/big"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,7 +17,7 @@ const (
 
 type Meeting struct {
 	ID           uuid.UUID       `gorm:"type:uuid;primary_key;default:uuid_generate_v4()" json:"id"`
-	Code         string          `gorm:"uniqueIndex;not null;size:10" json:"code"`
+	Code         string          `gorm:"uniqueIndex;not null;size:36" json:"code"`
 	Title        string          `gorm:"not null" json:"title"`
 	Description  string          `gorm:"type:text" json:"description"`
 	HostID       uuid.UUID       `gorm:"type:uuid;not null" json:"host_id"`
@@ -56,28 +54,9 @@ func (m *Meeting) BeforeCreate(tx *gorm.DB) error {
 		m.ID = uuid.New()
 	}
 
-	// Generate unique meeting code with retry mechanism
+	// Generate unique meeting code using UUID
 	if m.Code == "" {
-		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
-			code := generateMeetingCode()
-
-			// Check if code already exists
-			var count int64
-			if err := tx.Model(&Meeting{}).Where("code = ?", code).Count(&count).Error; err != nil {
-				return err
-			}
-
-			if count == 0 {
-				m.Code = code
-				break
-			}
-
-			// If this is the last retry and still duplicate, return error
-			if i == maxRetries-1 {
-				return gorm.ErrDuplicatedKey
-			}
-		}
+		m.Code = generateMeetingCode()
 	}
 
 	// Set default settings if all fields are zero (not provided)
@@ -100,26 +79,10 @@ func (Meeting) TableName() string {
 	return "meetings"
 }
 
-// generateMeetingCode generates a cryptographically secure random 10-character meeting code
+// generateMeetingCode generates a unique meeting code using UUID
 func generateMeetingCode() string {
-	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-	const codeLength = 10
-
-	code := make([]byte, codeLength)
-	charsetLen := big.NewInt(int64(len(charset)))
-
-	for i := range code {
-		// Use crypto/rand for secure random generation
-		randomIndex, err := rand.Int(rand.Reader, charsetLen)
-		if err != nil {
-			// Fallback to timestamp-based (should rarely happen)
-			code[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-		} else {
-			code[i] = charset[randomIndex.Int64()]
-		}
-	}
-
-	return string(code)
+	// Generate a new UUID and return as string
+	return uuid.New().String()
 }
 
 // MeetingResponse represents the meeting data sent in API responses

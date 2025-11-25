@@ -24,9 +24,9 @@ func InitPostgres(cfg *config.DatabaseConfig) error {
 		cfg.SSLMode,
 	)
 
-	// Configure GORM logger
+	// Configure GORM logger - only show errors
 	gormConfig := &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logger.Error),
 	}
 
 	// Open database connection
