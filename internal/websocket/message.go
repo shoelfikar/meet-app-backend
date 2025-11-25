@@ -17,6 +17,9 @@ const (
 	MessageTypePeerJoined  MessageType = "peer-joined"
 	MessageTypePeerLeft    MessageType = "peer-left"
 
+	// Media state
+	MessageTypeMediaStateChanged MessageType = "media-state-changed"
+
 	// Connection status
 	MessageTypeReady       MessageType = "ready"
 	MessageTypeError       MessageType = "error"
