@@ -203,8 +203,9 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 
 	case MessageTypeMediaStateChanged:
 		// Broadcast media state changes to all other participants
-		log.Printf("WebSocket: User %s changed media state in meeting %s", client.UserID, client.MeetingID)
+		log.Printf("WebSocket: User %s changed media state in meeting %s, data: %+v", client.UserID, client.MeetingID, msg.Data)
 		h.hub.SendMessage(msg)
+		log.Printf("WebSocket: Media state change broadcasted from %s", client.UserID)
 
 	case MessageTypeHostJoin:
 		// Handle host joining (auto-approve)
