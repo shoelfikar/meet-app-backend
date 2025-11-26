@@ -28,6 +28,9 @@ type Hub struct {
 	// Pending join requests per meeting
 	pendingJoinRequests map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo
 
+	// Screen sharing users per meeting (meetingID -> userID)
+	screenSharingUsers map[uuid.UUID]uuid.UUID
+
 	// Register requests from clients
 	register chan *Client
 
@@ -46,6 +49,7 @@ func NewHub() *Hub {
 		clients:             make(map[uuid.UUID]map[uuid.UUID]*Client),
 		pendingClients:      make(map[uuid.UUID]map[uuid.UUID]*Client),
 		pendingJoinRequests: make(map[uuid.UUID]map[uuid.UUID]*JoinRequestInfo),
+		screenSharingUsers:  make(map[uuid.UUID]uuid.UUID),
 		register:            make(chan *Client),
 		unregister:          make(chan *Client),
 		broadcast:           make(chan *Message, 256),
@@ -97,6 +101,36 @@ func (h *Hub) unregisterClient(client *Client) {
 
 			log.Printf("WebSocket: Client unregistered - UserID: %s, MeetingID: %s",
 				client.UserID, client.MeetingID)
+
+			// Check if this user was sharing screen and clean up
+			if sharingUserID, isSharing := h.screenSharingUsers[client.MeetingID]; isSharing {
+				if sharingUserID == client.UserID {
+					delete(h.screenSharingUsers, client.MeetingID)
+					log.Printf("WebSocket: Screen sharing stopped (user disconnected) - UserID: %s, MeetingID: %s",
+						client.UserID, client.MeetingID)
+
+					// Notify other peers that screen sharing stopped
+					stopMessage := &Message{
+						Type:      MessageTypeScreenShareStopped,
+						From:      client.UserID,
+						MeetingID: client.MeetingID,
+						Data: map[string]interface{}{
+							"user_id": client.UserID,
+						},
+					}
+
+					// Broadcast to remaining clients
+					for _, c := range clients {
+						if c.UserID != client.UserID {
+							select {
+							case c.Send <- mustMarshal(stopMessage):
+							default:
+								log.Printf("WebSocket: Failed to send screen share stopped to %s", c.UserID)
+							}
+						}
+					}
+				}
+			}
 
 			// Clean up empty meetings
 			if len(clients) == 0 {
@@ -421,6 +455,41 @@ func (h *Hub) GetClient(meetingID uuid.UUID, userID uuid.UUID) *Client {
 		}
 	}
 	return nil
+}
+
+// StartScreenShare starts screen sharing for a user in a meeting
+func (h *Hub) StartScreenShare(meetingID uuid.UUID, userID uuid.UUID) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Optional: Check if someone else is already sharing (single presenter mode)
+	// if existingUserID, exists := h.screenSharingUsers[meetingID]; exists {
+	// 	return fmt.Errorf("user %s is already sharing screen", existingUserID)
+	// }
+
+	h.screenSharingUsers[meetingID] = userID
+	log.Printf("WebSocket: Screen sharing started - UserID: %s, MeetingID: %s", userID, meetingID)
+	return nil
+}
+
+// StopScreenShare stops screen sharing for a meeting
+func (h *Hub) StopScreenShare(meetingID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if userID, ok := h.screenSharingUsers[meetingID]; ok {
+		delete(h.screenSharingUsers, meetingID)
+		log.Printf("WebSocket: Screen sharing stopped - UserID: %s, MeetingID: %s", userID, meetingID)
+	}
+}
+
+// GetScreenSharingUser returns the user currently sharing screen in a meeting
+func (h *Hub) GetScreenSharingUser(meetingID uuid.UUID) (uuid.UUID, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	userID, ok := h.screenSharingUsers[meetingID]
+	return userID, ok
 }
 
 // Global hub instance

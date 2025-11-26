@@ -222,6 +222,14 @@ func (h *Handler) handleMessage(client *Client, msg *Message) {
 		// Handle rejection from host
 		h.handleRejectJoinRequest(client, msg)
 
+	case MessageTypeScreenShareStarted:
+		// Handle screen share started
+		h.handleScreenShareStarted(client, msg)
+
+	case MessageTypeScreenShareStopped:
+		// Handle screen share stopped
+		h.handleScreenShareStopped(client, msg)
+
 	case MessageTypeJoin:
 		// Already handled by registration
 		log.Printf("WebSocket: User %s joined meeting %s", client.UserID, client.MeetingID)
@@ -242,6 +250,27 @@ func (h *Handler) handleHostJoin(client *Client, msg *Message) {
 
 	// Move client from pending to registered (auto-approve for host)
 	h.hub.ApproveClient(client.MeetingID, client.UserID)
+
+	// Check if someone is currently sharing screen and notify the host
+	if sharingUserID, isSharing := h.hub.GetScreenSharingUser(client.MeetingID); isSharing {
+		// Get the sharing user's client to get username
+		sharingClient := h.hub.GetClient(client.MeetingID, sharingUserID)
+		if sharingClient != nil {
+			screenShareMsg := &Message{
+				Type:      MessageTypeScreenShareStarted,
+				From:      sharingUserID,
+				To:        client.UserID,
+				MeetingID: client.MeetingID,
+				Data: &ScreenShareInfo{
+					UserID:    sharingUserID,
+					Username:  sharingClient.Username,
+					Timestamp: time.Now().Unix(),
+				},
+			}
+			h.hub.SendMessage(screenShareMsg)
+			log.Printf("WebSocket: Sent screen share state to host %s", client.UserID)
+		}
+	}
 
 	log.Printf("WebSocket: Host %s auto-approved and registered", client.UserID)
 }
@@ -291,6 +320,27 @@ func (h *Handler) handleJoinRequest(client *Client, msg *Message) {
 			},
 		}
 		h.hub.SendMessage(approvalMsg)
+
+		// Check if someone is currently sharing screen and notify the re-joining user
+		if sharingUserID, isSharing := h.hub.GetScreenSharingUser(client.MeetingID); isSharing {
+			// Get the sharing user's client to get username
+			sharingClient := h.hub.GetClient(client.MeetingID, sharingUserID)
+			if sharingClient != nil {
+				screenShareMsg := &Message{
+					Type:      MessageTypeScreenShareStarted,
+					From:      sharingUserID,
+					To:        client.UserID,
+					MeetingID: client.MeetingID,
+					Data: &ScreenShareInfo{
+						UserID:    sharingUserID,
+						Username:  sharingClient.Username,
+						Timestamp: time.Now().Unix(),
+					},
+				}
+				h.hub.SendMessage(screenShareMsg)
+				log.Printf("WebSocket: Sent screen share state to re-joining user %s", client.UserID)
+			}
+		}
 
 		log.Printf("WebSocket: User %s auto-approved for re-join", client.UserID)
 		return
@@ -396,6 +446,27 @@ func (h *Handler) handleApproveJoinRequest(client *Client, msg *Message) {
 	}
 	h.hub.SendMessage(approvalMsg)
 
+	// Check if someone is currently sharing screen and notify the new user
+	if sharingUserID, isSharing := h.hub.GetScreenSharingUser(client.MeetingID); isSharing {
+		// Get the sharing user's client to get username
+		sharingClient := h.hub.GetClient(client.MeetingID, sharingUserID)
+		if sharingClient != nil {
+			screenShareMsg := &Message{
+				Type:      MessageTypeScreenShareStarted,
+				From:      sharingUserID,
+				To:        requestUserID,
+				MeetingID: client.MeetingID,
+				Data: &ScreenShareInfo{
+					UserID:    sharingUserID,
+					Username:  sharingClient.Username,
+					Timestamp: time.Now().Unix(),
+				},
+			}
+			h.hub.SendMessage(screenShareMsg)
+			log.Printf("WebSocket: Sent screen share state to newly joined user %s", requestUserID)
+		}
+	}
+
 	log.Printf("WebSocket: Host %s approved join request from %s (%s)", client.UserID, joinRequest.Username, requestUserID)
 }
 
@@ -446,6 +517,77 @@ func (h *Handler) handleRejectJoinRequest(client *Client, msg *Message) {
 	h.hub.SendMessage(rejectionMsg)
 
 	log.Printf("WebSocket: Host %s rejected join request from %s (%s)", client.UserID, joinRequest.Username, requestUserID)
+}
+
+// handleScreenShareStarted handles screen share started message
+func (h *Handler) handleScreenShareStarted(client *Client, msg *Message) {
+	log.Printf("WebSocket: User %s started screen sharing in meeting %s", client.UserID, client.MeetingID)
+
+	// Parse screen share data
+	data, ok := msg.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("WebSocket: Invalid screen share data from %s", client.UserID)
+		h.sendError(client, "Invalid screen share data")
+		return
+	}
+
+	username, _ := data["username"].(string)
+	if username == "" {
+		username = client.Username
+	}
+
+	// Mark user as sharing screen
+	if err := h.hub.StartScreenShare(client.MeetingID, client.UserID); err != nil {
+		log.Printf("WebSocket: Failed to start screen share: %v", err)
+		h.sendError(client, "Failed to start screen sharing")
+		return
+	}
+
+	// Create screen share info
+	screenShareInfo := &ScreenShareInfo{
+		UserID:    client.UserID,
+		Username:  username,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Broadcast screen share started to all participants (including sender)
+	broadcastMsg := &Message{
+		Type:      MessageTypeScreenShareStarted,
+		From:      client.UserID,
+		MeetingID: client.MeetingID,
+		Data:      screenShareInfo,
+	}
+	h.hub.SendMessage(broadcastMsg)
+
+	log.Printf("WebSocket: Screen sharing started broadcast sent for user %s", client.UserID)
+}
+
+// handleScreenShareStopped handles screen share stopped message
+func (h *Handler) handleScreenShareStopped(client *Client, msg *Message) {
+	log.Printf("WebSocket: User %s stopped screen sharing in meeting %s", client.UserID, client.MeetingID)
+
+	// Verify user was actually sharing
+	sharingUserID, isSharing := h.hub.GetScreenSharingUser(client.MeetingID)
+	if !isSharing || sharingUserID != client.UserID {
+		log.Printf("WebSocket: User %s was not sharing screen in meeting %s", client.UserID, client.MeetingID)
+		return
+	}
+
+	// Stop screen sharing
+	h.hub.StopScreenShare(client.MeetingID)
+
+	// Broadcast screen share stopped to all participants
+	broadcastMsg := &Message{
+		Type:      MessageTypeScreenShareStopped,
+		From:      client.UserID,
+		MeetingID: client.MeetingID,
+		Data: map[string]interface{}{
+			"user_id": client.UserID.String(),
+		},
+	}
+	h.hub.SendMessage(broadcastMsg)
+
+	log.Printf("WebSocket: Screen sharing stopped broadcast sent for user %s", client.UserID)
 }
 
 // sendError sends an error message to a client

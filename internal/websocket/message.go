@@ -30,6 +30,10 @@ const (
 	MessageTypeJoinApproved       MessageType = "join-approved"
 	MessageTypeJoinRejected       MessageType = "join-rejected"
 
+	// Screen sharing
+	MessageTypeScreenShareStarted MessageType = "screen-share-started"
+	MessageTypeScreenShareStopped MessageType = "screen-share-stopped"
+
 	// Connection status
 	MessageTypeReady MessageType = "ready"
 	MessageTypeError MessageType = "error"
@@ -73,5 +77,12 @@ type JoinRequestInfo struct {
 	UserID    uuid.UUID `json:"user_id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
+	Timestamp int64     `json:"timestamp"`
+}
+
+// ScreenShareInfo represents information about screen sharing
+type ScreenShareInfo struct {
+	UserID    uuid.UUID `json:"user_id"`
+	Username  string    `json:"username"`
 	Timestamp int64     `json:"timestamp"`
 }
